@@ -14,8 +14,6 @@ load_dotenv()
 # --- Configuration ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PORT = int(os.getenv("PORT", 8000))
-
-# Using the generic alias is often safer/more stable
 MODEL = "gpt-4o-realtime-preview"
 
 SYSTEM_MESSAGE = (
@@ -47,7 +45,6 @@ async def media_stream(websocket: WebSocket):
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "OpenAI-Beta": "realtime=v1",
     }
-
     ssl_context = ssl.create_default_context(cafile=certifi.where())
 
     try:
@@ -56,7 +53,7 @@ async def media_stream(websocket: WebSocket):
                 additional_headers=headers,
                 ssl=ssl_context
         ) as openai_ws:
-            print(">>> Connected to OpenAI. Initializing...")
+            print(">>> Connected to OpenAI.")
 
             # 1. Initialize Session
             await openai_ws.send(json.dumps({
@@ -69,9 +66,10 @@ async def media_stream(websocket: WebSocket):
                     "output_audio_format": "g711_ulaw",
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,  # Adjust sensitivity
+                        "threshold": 0.5,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500
+                        "silence_duration_ms": 200,  # Shorter silence = faster turn taking
+                        "create_response": True  # Automatically respond when user stops talking
                     }
                 }
             }))
@@ -94,8 +92,7 @@ async def media_stream(websocket: WebSocket):
                         elif data['event'] == 'start':
                             stream_sid = data['start']['streamSid']
                             print(f"--- Stream Started: {stream_sid} ---")
-
-                            # Force a Greeting
+                            # Trigger Greeting
                             print(">>> Triggering Greeting...")
                             await openai_ws.send(json.dumps({
                                 "type": "response.create",
@@ -114,12 +111,29 @@ async def media_stream(websocket: WebSocket):
                     async for message in openai_ws:
                         response = json.loads(message)
 
+                        # 1. Audio Delta: AI is speaking
                         if response['type'] == 'response.audio.delta' and stream_sid:
                             await websocket.send_json({
                                 "event": "media",
                                 "streamSid": stream_sid,
                                 "media": {"payload": response['delta']}
                             })
+
+                        # 2. INTERRUPT HANDLER: User started speaking
+                        elif response['type'] == 'input_audio_buffer.speech_started':
+                            print(">>> INTERRUPT DETECTED: Clearing audio buffer...")
+
+                            # A. Send "Clear" to Twilio to stop current audio
+                            if stream_sid:
+                                await websocket.send_json({
+                                    "event": "clear",
+                                    "streamSid": stream_sid
+                                })
+
+                            # B. Cancel OpenAI's current response generation
+                            await openai_ws.send(json.dumps({
+                                "type": "response.cancel"
+                            }))
 
                         elif response['type'] == 'response.audio_transcript.done':
                             print(f"AI: {response['transcript']}")
@@ -132,17 +146,8 @@ async def media_stream(websocket: WebSocket):
 
             await asyncio.gather(receive_from_twilio(), receive_from_openai())
 
-    except websockets.exceptions.InvalidStatusCode as e:
-        print(f"\n!!! CONNECTION FAILED: {e.status_code}")
-        if e.status_code == 403:
-            print(">>> CAUSE: Invalid API Key or Permissions.")
-        elif e.status_code == 400:
-            print(">>> CAUSE: Bad Request (Check model name or format).")
-        elif e.status_code == 429:
-            print(">>> CAUSE: Rate Limit or Insufficient Quota (Check Billing).")
-
     except Exception as e:
-        print(f"\n!!! UNEXPECTED ERROR: {e}")
+        print(f"\n!!! ERROR: {e}")
 
 
 if __name__ == "__main__":
