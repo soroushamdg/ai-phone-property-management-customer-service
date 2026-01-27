@@ -1,0 +1,57 @@
+1. Specific Property Details (Fact Retrieval)
+"What amenities are available at Champlain Condo Rentals?"
+
+"Does Leora in Saint-Laurent have a gym?"
+
+"I’m interested in The Wilcox. Who designed the common spaces there?"
+
+"What is the exact address of Erin Condos?"
+
+"Does the Domo building have a pool?"
+
+2. Neighborhood & Discovery (Search & Filtering)
+"I want to live in Griffintown. Which buildings do you manage there?"
+
+"Do you have any properties near Jarry Park?"
+
+"Show me apartments in Old Montreal."
+
+"I need a place in Ahuntsic near the metro. What do you have?"
+
+"What options do you have in the Quartier des Spectacles?"
+
+3. Unit Types & Availability
+"Do you have any 3-bedroom units available at Univert Lasalle?"
+
+"I'm looking for a townhouse. Which properties offer those?"
+
+"Does Myriade offer 3-bedroom apartments?"
+
+"I need a studio apartment. Does Will & Rich have studios?"
+
+4. Utilities & Inclusions (Policy Checking)
+"Is electricity included in the rent at Laurence Condos?"
+
+"What appliances are included at Aldea?"
+
+"Are heating and hot water included at Griffin Square?"
+
+"I have a car. Does Vida Lasalle have indoor parking?"
+
+5. Comparative & Complex Questions
+"What is the difference between NüBerri and Zenith?"
+
+"I'm torn between Sherwin and McCord. Which one has a rooftop pool?"
+
+"I want a building with a yoga studio. Does Jacques Condo Rentals or Milhaus have one?"
+
+"Which building is closer to the Atwater Market: Wilcox or Will & Rich?"
+
+6. Natural Language / Vague Queries
+"I want a place with a really nice view of the city."
+
+"Do you have any buildings that are good for students near UQAM?"
+
+"I need a place that feels like a hotel."
+
+"Find me a building with a 'green' or nature vibe."

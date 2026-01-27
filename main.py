@@ -1,6 +1,7 @@
 import os
 import json
 import asyncio
+import glob
 import websockets
 import ssl
 import certifi
@@ -18,16 +19,33 @@ MODEL = "gpt-4o-realtime-preview"
 
 SYSTEM_MESSAGE = (
     "You are a helpful assistant named Riley. "
-    "Speak fast, briefly, and clearly. Do not use markdown."
+    "Speak fast, briefly, and clearly. "
+    "Start with Bonjour/Hi"
+    "When the user says goodbye or indicates they are finished, "
+    "you MUST say a polite goodbye and then immediately call the 'end_call' tool."
 )
 
 app = FastAPI()
 
 
+# --- HELPER: Load Markdown Files ---
+def load_knowledge_base():
+    kb_content = "\n\n# KNOWLEDGE BASE:\n"
+    if not os.path.exists("knowledge_base"):
+        os.makedirs("knowledge_base")
+        return kb_content + "(No knowledge base files found.)"
+    files = glob.glob("knowledge_base/*.md")
+    for file_path in files:
+        with open(file_path, "r") as f:
+            kb_content += f"\n--- SOURCE: {os.path.basename(file_path)} ---\n"
+            kb_content += f.read()
+    return kb_content
+
+
 @app.api_route("/incoming-call", methods=["GET", "POST"])
 async def incoming_call(request: Request):
     response = VoiceResponse()
-    response.say("Connecting to Riley.")
+    response.say("Waiting for riley to pickup.")
     response.pause(length=1)
     connect = Connect()
     connect.stream(url=f"wss://{request.url.hostname}/media-stream")
@@ -39,6 +57,9 @@ async def incoming_call(request: Request):
 async def media_stream(websocket: WebSocket):
     print("Client connected")
     await websocket.accept()
+
+    knowledge_base_text = load_knowledge_base()
+    full_system_prompt = SYSTEM_MESSAGE + knowledge_base_text
 
     openai_url = f"wss://api.openai.com/v1/realtime?model={MODEL}"
     headers = {
@@ -55,22 +76,35 @@ async def media_stream(websocket: WebSocket):
         ) as openai_ws:
             print(">>> Connected to OpenAI.")
 
-            # 1. Initialize Session
+            # 1. Initialize Session with Tool Definition
             await openai_ws.send(json.dumps({
                 "type": "session.update",
                 "session": {
                     "modalities": ["text", "audio"],
-                    "instructions": SYSTEM_MESSAGE,
-                    "voice": "ash",
+                    "instructions": full_system_prompt,
+                    "voice": "alloy",
                     "input_audio_format": "g711_ulaw",
                     "output_audio_format": "g711_ulaw",
                     "turn_detection": {
                         "type": "server_vad",
                         "threshold": 0.5,
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 200,  # Shorter silence = faster turn taking
-                        "create_response": True  # Automatically respond when user stops talking
-                    }
+                        "silence_duration_ms": 200,
+                        "create_response": True
+                    },
+                    # --- NEW: Define the Tool ---
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "end_call",
+                            "description": "Ends the phone call. Use this when the user says goodbye, bye, or indicates they are done.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {}
+                            }
+                        }
+                    ],
+                    "tool_choice": "auto"
                 }
             }))
 
@@ -93,12 +127,11 @@ async def media_stream(websocket: WebSocket):
                             stream_sid = data['start']['streamSid']
                             print(f"--- Stream Started: {stream_sid} ---")
                             # Trigger Greeting
-                            print(">>> Triggering Greeting...")
                             await openai_ws.send(json.dumps({
                                 "type": "response.create",
                                 "response": {
                                     "modalities": ["text", "audio"],
-                                    "instructions": "Say 'Hello, I am ready!'"
+                                    "instructions": "Say 'Hello! How can I help you today?'"
                                 }
                             }))
 
@@ -111,7 +144,6 @@ async def media_stream(websocket: WebSocket):
                     async for message in openai_ws:
                         response = json.loads(message)
 
-                        # 1. Audio Delta: AI is speaking
                         if response['type'] == 'response.audio.delta' and stream_sid:
                             await websocket.send_json({
                                 "event": "media",
@@ -119,21 +151,22 @@ async def media_stream(websocket: WebSocket):
                                 "media": {"payload": response['delta']}
                             })
 
-                        # 2. INTERRUPT HANDLER: User started speaking
                         elif response['type'] == 'input_audio_buffer.speech_started':
-                            print(">>> INTERRUPT DETECTED: Clearing audio buffer...")
-
-                            # A. Send "Clear" to Twilio to stop current audio
+                            print(">>> INTERRUPT: Clearing buffer...")
                             if stream_sid:
-                                await websocket.send_json({
-                                    "event": "clear",
-                                    "streamSid": stream_sid
-                                })
+                                await websocket.send_json({"event": "clear", "streamSid": stream_sid})
+                            await openai_ws.send(json.dumps({"type": "response.cancel"}))
 
-                            # B. Cancel OpenAI's current response generation
-                            await openai_ws.send(json.dumps({
-                                "type": "response.cancel"
-                            }))
+                        # --- NEW: Handle Function Calls (Hangup) ---
+                        elif response['type'] == 'response.function_call_arguments.done':
+                            if response['name'] == 'end_call':
+                                print(">>> AI REQUESTED HANGUP")
+                                # Wait 2 seconds for the AI's "Goodbye" audio to finish playing on the phone
+                                print(">>> Waiting for audio to finish...")
+                                await asyncio.sleep(2)
+                                print(">>> Hanging up now.")
+                                await websocket.close()
+                                return  # Exit the loop
 
                         elif response['type'] == 'response.audio_transcript.done':
                             print(f"AI: {response['transcript']}")
