@@ -7,7 +7,7 @@ APP_PORT=8000
 echo " Initializing AI Phone System..."
 
 # 1. Activate Virtual Environment
-if [ -d "venv" ]; the
+if [ -d "venv" ]; then
     source venv/bin/activate
 else
     echo "❌ Error: 'venv' directory not found. Please create it first."
