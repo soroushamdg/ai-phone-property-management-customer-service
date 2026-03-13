@@ -9,14 +9,20 @@ from fastapi.responses import HTMLResponse
 from dotenv import load_dotenv
 from twilio.twiml.voice_response import VoiceResponse, Connect
 import db
+import knowledge_base
 
 load_dotenv()
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 PORT = int(os.getenv("PORT", 8000))
 MODEL = "gpt-4o-realtime-preview"
+KNOWLEDGE_ENABLED = os.getenv("ENABLE_KNOWLEDGE_BASE", "false").lower() == "true"
 
 app = FastAPI()
+
+# Initialize knowledge base if enabled
+if KNOWLEDGE_ENABLED:
+    knowledge_base.initialize_knowledge_base()
 
 # --- SYSTEM PROMPT ---
 BASE_SYSTEM_MESSAGE = (
@@ -28,6 +34,17 @@ BASE_SYSTEM_MESSAGE = (
     "Keep your responses short (under 2 sentences) but drive the conversation forward. "
     "When the user indicates they are done or says goodbye, you MUST say a polite goodbye phrase "
     "like 'Have a great day!' and then immediately call the 'end_call' tool."
+)
+
+KNOWLEDGE_SYSTEM_MESSAGE = (
+    "You are Riley, a knowledgeable property management assistant. "
+    "You help people find rental properties in Montreal. "
+    "You have access to a comprehensive database of properties with details about amenities, locations, and features. "
+    "When users ask about properties, neighborhoods, amenities, or locations, use the search_properties tool to find relevant information. "
+    "Be proactive in suggesting properties that match their needs. "
+    "If the user is new, ask for their name first. "
+    "Keep responses concise and helpful. "
+    "When done, say goodbye and use the end_call tool."
 )
 
 TOOLS = [
@@ -65,6 +82,24 @@ TOOLS = [
             },
             "required": ["description", "category"]
         }
+    },
+    {
+        "type": "function",
+        "name": "search_properties",
+        "description": "Search properties by location, amenities, or features. Use this when users ask about available properties, neighborhoods, or specific features.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "Search query about properties, locations, amenities, or features"}
+            },
+            "required": ["query"]
+        }
+    },
+    {
+        "type": "function",
+        "name": "load_knowledge_base",
+        "description": "Load the complete property knowledge base into your context. Use this when you need comprehensive information about Montreal rental properties to provide detailed answers or make proactive suggestions.",
+        "parameters": {"type": "object", "properties": {}}
     }
 ]
 
@@ -107,6 +142,9 @@ async def media_stream(websocket: WebSocket):
         stream_sid = None
         call_phone_number = None
         contact_id = None
+        end_call_requested = False
+        goodbye_response_id = None
+        goodbye_audio_playing = False
 
         async def initialize_ai_session():
             nonlocal contact_id
@@ -135,7 +173,10 @@ async def media_stream(websocket: WebSocket):
                 )
                 greeting = "Hello, this is Riley Support. I don't have your number saved. What is your full name?"
 
-            full_system_prompt = BASE_SYSTEM_MESSAGE + "\n\nCONTEXT:\n" + context_instruction
+            # Choose system message based on knowledge base setting
+            base_message = KNOWLEDGE_SYSTEM_MESSAGE if KNOWLEDGE_ENABLED else BASE_SYSTEM_MESSAGE
+            
+            full_system_prompt = base_message + "\n\nCONTEXT:\n" + context_instruction
 
             # Configure OpenAI
             await openai_ws.send(json.dumps({
@@ -198,12 +239,25 @@ async def media_stream(websocket: WebSocket):
 
         # --- OpenAI Listener ---
         async def receive_from_openai():
-            nonlocal contact_id
+            nonlocal contact_id, end_call_requested, goodbye_response_id, goodbye_audio_playing
             try:
                 async for message in openai_ws:
                     response = json.loads(message)
 
-                    if response['type'] == 'response.audio.delta' and stream_sid:
+                    if response['type'] == 'response.created':
+                        if end_call_requested:
+                            goodbye_response_id = response['response']['id']
+                            print(f">>> Goodbye response started: {goodbye_response_id}")
+                            goodbye_audio_playing = True
+
+                    elif response['type'] == 'response.done':
+                        if goodbye_response_id and response['response']['id'] == goodbye_response_id:
+                            print(">>> Goodbye response finished, ending call.")
+                            await asyncio.sleep(0.5)  # Brief pause for audio to flush
+                            await websocket.close()
+                            return
+
+                    elif response['type'] == 'response.audio.delta' and stream_sid:
                         await websocket.send_json({
                             "event": "media", "streamSid": stream_sid, "media": {"payload": response['delta']}
                         })
@@ -220,10 +274,9 @@ async def media_stream(websocket: WebSocket):
 
                         if response['name'] == 'end_call':
                             print(">>> Ending Call Requested.")
-                            # Wait 3 seconds for the "Goodbye" audio to finish playing
-                            await asyncio.sleep(3)
-                            await websocket.close()
-                            return
+                            end_call_requested = True
+                            # Don't end call immediately - wait for goodbye to finish
+                            tool_output = "Call will end after goodbye message."
 
                         elif response['name'] == 'register_user':
                             if call_phone_number and args.get('name'):
@@ -242,6 +295,27 @@ async def media_stream(websocket: WebSocket):
                                 tool_output = f"Ticket created. ID: {ticket['id']}"
                             else:
                                 tool_output = "Error: User not found."
+
+                        elif response['name'] == 'search_properties':
+                            if KNOWLEDGE_ENABLED:
+                                search_result = knowledge_base.search_properties(args['query'])
+                                if 'error' in search_result:
+                                    tool_output = f"Property search unavailable: {search_result['error']}"
+                                else:
+                                    # Format search results for user
+                                    results_text = []
+                                    for result in search_result['results'][:3]:  # Top 3 results
+                                        results_text.append(f"• {result['text'][:200]}...")
+                                    tool_output = f"Found {search_result['total_found']} properties:\n" + "\n".join(results_text)
+                            else:
+                                tool_output = "Property search is not available."
+
+                        elif response['name'] == 'load_knowledge_base':
+                            if KNOWLEDGE_ENABLED:
+                                all_knowledge = knowledge_base.get_all_knowledge()
+                                tool_output = all_knowledge
+                            else:
+                                tool_output = "Knowledge base is not available."
 
                         if tool_output:
                             print(f">>> Tool Output: {tool_output}")

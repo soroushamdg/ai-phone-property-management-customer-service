@@ -1,0 +1,56 @@
+#!/bin/bash
+
+# --- Configuration ---
+# Change this to match the port your main.py uses (FastAPI/Flask default is often 8000 or 5000)
+APP_PORT=8000
+
+echo " Initializing AI Phone System..."
+
+# 1. Activate Virtual Environment
+if [ -d "venv" ]; then
+    source venv/bin/activate
+else
+    echo "❌ Error: 'venv' directory not found. Please create it first."
+    exit 1
+fi
+
+# 2. Get Latest Code
+echo "⬇️  Pulling latest changes from GitHub..."
+git pull origin main
+
+# 3. Install/Update Dependencies
+echo " Checking for dependency updates..."
+pip install -r requirements.txt > /dev/null
+
+# 4. Start Ngrok in Background
+echo " Launching Ngrok Tunnel..."
+# Kill any existing ngrok processes to avoid conflicts
+pkill ngrok
+# Start ngrok quietly in the background
+ngrok http $APP_PORT > /dev/null 2>&1 &
+NGROK_PID=$!
+
+# Give ngrok a few seconds to connect
+sleep 3
+
+# 5. Retrieve and Print the Public URL
+# We use Python to parse the JSON because we know Python is installed on your system
+PUBLIC_URL=$(curl -s http://localhost:4040/api/tunnels | python3 -c "import sys, json; print(json.load(sys.stdin)['tunnels'][0]['public_url'])" 2>/dev/null)
+
+if [ -z "$PUBLIC_URL" ]; then
+    echo "⚠️  Ngrok failed to start. Check your authtoken."
+else
+    echo "=========================================================="
+    echo "✅  SYSTEM READY"
+    echo "  Ngrok URL: $PUBLIC_URL"
+    echo "  Update your Twilio Webhook with this URL!"
+    echo "=========================================================="
+fi
+
+# 6. Run the Main Python App
+echo " Starting main.py..."
+
+# This 'trap' command ensures Ngrok stops when you press Ctrl+C to stop the python app
+trap "kill $NGROK_PID" EXIT
+
+python main.py
